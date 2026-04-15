@@ -46,6 +46,7 @@ const SalesReceipts = () => {
 
   useEffect(() => {
     fetchAllData();
+    loadRemarks();
   }, [dateRange]);
 
   // ---------------- FETCH ----------------
@@ -85,6 +86,55 @@ const SalesReceipts = () => {
     }
   };
 
+  // ---------------- REMARKS (FIXED + SAFE) ----------------
+  const loadRemarks = async () => {
+    try {
+      const from = format(dateRange.from, 'yyyy-MM-dd');
+      const to = format(dateRange.to, 'yyyy-MM-dd');
+
+      const { data, error } = await supabase
+        .from("remarks")
+        .select("*")
+        .eq("date_from", from)
+        .eq("date_to", to)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (data?.note) {
+        setRemarks(data.note);
+      } else {
+        setRemarks("");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const saveRemarks = async () => {
+    try {
+      const from = format(dateRange.from, 'yyyy-MM-dd');
+      const to = format(dateRange.to, 'yyyy-MM-dd');
+
+      const { error } = await supabase
+        .from("remarks")
+        .upsert({
+          date_from: from,
+          date_to: to,
+          note: remarks
+        }, {
+          onConflict: "date_from,date_to"
+        });
+
+      if (error) throw error;
+
+      toast.success("Remarks saved");
+    } catch (err) {
+      console.error(err);
+      toast.error("Failed to save remarks");
+    }
+  };
+
   // ---------------- DELETE ----------------
   const deleteSale = async (id: string) => {
     if (!window.confirm("Delete this sale?")) return;
@@ -106,21 +156,26 @@ const SalesReceipts = () => {
     }
   };
 
+  // ---------------- FILTERED DATA ----------------
+  const filteredSales = selectedCustomer
+    ? sales.filter(s => s.customer_name === selectedCustomer)
+    : sales;
+
   // ---------------- STATS ----------------
   const stats = useMemo(() => {
-    const totalSales = sales.reduce((sum, s) => sum + Number(s.amount), 0);
-    const totalLitres = sales.reduce((sum, s) => sum + Number(s.litres), 0);
+    const totalSales = filteredSales.reduce((sum, s) => sum + Number(s.amount), 0);
+    const totalLitres = filteredSales.reduce((sum, s) => sum + Number(s.litres), 0);
 
-    const mpesa = sales.filter(s => s.payment_method === 'mpesa')
+    const mpesa = filteredSales.filter(s => s.payment_method === 'mpesa')
       .reduce((sum, s) => sum + Number(s.amount), 0);
 
-    const cash = sales.filter(s => s.payment_method === 'cash')
+    const cash = filteredSales.filter(s => s.payment_method === 'cash')
       .reduce((sum, s) => sum + Number(s.amount), 0);
 
-    const bank = sales.filter(s => s.payment_method === 'bank')
+    const bank = filteredSales.filter(s => s.payment_method === 'bank')
       .reduce((sum, s) => sum + Number(s.amount), 0);
 
-    const credit = sales.filter(s => s.payment_method === 'credit')
+    const credit = filteredSales.filter(s => s.payment_method === 'credit')
       .reduce((sum, s) => sum + Number(s.amount), 0);
 
     return {
@@ -130,11 +185,49 @@ const SalesReceipts = () => {
       cash,
       bank,
       credit,
-      count: sales.length
+      count: filteredSales.length
     };
-  }, [sales]);
+  }, [filteredSales]);
 
   const remainingMilk = milkProduced - stats.litres;
+
+  // ---------------- DOWNLOAD ----------------
+  const downloadReceipt = () => {
+    const doc = new jsPDF();
+
+    doc.addImage("/farmLogo.png", "PNG", 14, 10, 30, 30);
+
+    doc.setFontSize(16);
+    doc.text("TRYDT FARMSTEAD", 50, 15);
+
+    doc.setFontSize(10);
+    doc.text(`Date: ${format(new Date(), "PPP")}`, 50, 22);
+
+    const tableData = filteredSales.map(s => [
+      format(new Date(s.date), 'PP'),
+      s.customer_name,
+      `${s.litres.toFixed(1)} L`,
+      `KES ${s.amount.toFixed(2)}`,
+      s.payment_method
+    ]);
+
+    autoTable(doc, {
+      startY: 40,
+      head: [["Date", "Customer", "Litres", "Amount", "Payment"]],
+      body: tableData
+    });
+
+    const finalY = (doc as any).lastAutoTable.finalY + 10;
+
+    doc.text(`Total: KES ${stats.total.toFixed(2)}`, 14, finalY);
+
+    if (remarks) {
+      doc.text("Remarks:", 14, finalY + 10);
+      doc.text(remarks, 14, finalY + 16);
+    }
+
+    doc.save(`receipt-${selectedCustomer || "all"}.pdf`);
+  };
 
   // ---------------- TABLE ----------------
   const columns = [
@@ -144,7 +237,6 @@ const SalesReceipts = () => {
     { key: 'amount', label: 'Amount', render: (item: MilkSale) => `KES ${item.amount.toFixed(2)}` },
     { key: 'payment_method', label: 'Payment' },
     { key: 'recorded_by', label: 'Recorded By' },
-
     {
       key: 'actions',
       label: '',
@@ -167,7 +259,7 @@ const SalesReceipts = () => {
 
         <Breadcrumb />
 
-        {/* ✅ HEADER (RESTORED CREDIT BUTTON HERE) */}
+        {/* HEADER */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <Receipt className="h-8 w-8 text-primary" />
@@ -177,12 +269,16 @@ const SalesReceipts = () => {
             </div>
           </div>
 
-          <Button
-            variant="outline"
-            onClick={() => navigate("/credit-details")}
-          >
-            Credit Payments
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => navigate("/credit-details")}>
+              Credit Payments
+            </Button>
+
+            <Button onClick={downloadReceipt}>
+              <Download className="h-4 w-4 mr-2" />
+              Download
+            </Button>
+          </div>
         </div>
 
         {/* FILTERS */}
@@ -236,50 +332,68 @@ const SalesReceipts = () => {
         </Card>
 
         {/* STATS */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
+{/* STATS (COLORED) */}
+<div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
+  
+  <Card className="p-4 bg-blue-50">
+    <p className="text-sm">Total Litres Sold</p>
+    <p className="text-xl font-bold">{stats.litres.toFixed(1)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">Total Litres</p>
-            <p className="text-xl font-bold">{stats.litres.toFixed(1)}</p>
-          </Card>
+  <Card className="p-4 bg-green-50">
+    <p className="text-sm">Sales</p>
+    <p className="text-xl font-bold">KES {stats.total.toFixed(2)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">Sales</p>
-            <p className="text-xl font-bold">KES {stats.total.toFixed(2)}</p>
-          </Card>
+  <Card className="p-4 bg-purple-50">
+    <p className="text-sm">M-Pesa</p>
+    <p className="text-xl font-bold">{stats.mpesa.toFixed(2)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">M-Pesa</p>
-            <p className="text-xl">{stats.mpesa.toFixed(2)}</p>
-          </Card>
+  <Card className="p-4 bg-yellow-50">
+    <p className="text-sm">Cash</p>
+    <p className="text-xl font-bold">{stats.cash.toFixed(2)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">Cash</p>
-            <p className="text-xl">{stats.cash.toFixed(2)}</p>
-          </Card>
+  {/* NEW */}
+  <Card className="p-4 bg-indigo-50">
+    <p className="text-sm">Bank</p>
+    <p className="text-xl font-bold">{stats.bank.toFixed(2)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">Produced</p>
-            <p className="text-xl font-bold">{milkProduced.toFixed(1)} L</p>
-          </Card>
+  {/* NEW */}
+  <Card className="p-4 bg-pink-50">
+    <p className="text-sm">Credit</p>
+    <p className="text-xl font-bold">{stats.credit.toFixed(2)}</p>
+  </Card>
 
-          <Card className="p-4">
-            <p className="text-sm">Remaining</p>
-            <p className="text-xl font-bold text-red-500">
-              {remainingMilk.toFixed(1)} L
-            </p>
-          </Card>
+  <Card className="p-4 bg-gray-100">
+    <p className="text-sm">Milk Produced</p>
+    <p className="text-xl font-bold">{milkProduced.toFixed(1)} L</p>
+  </Card>
 
-        </div>
+  <Card className="p-4 bg-red-100">
+    <p className="text-sm">Remaining Milk
+    </p>
+    <p className="text-xl font-bold text-red-600">
+      {remainingMilk.toFixed(1)} L
+    </p>
+  </Card>
+
+</div>
 
         {/* REMARKS */}
         <Card className="p-4 mb-6">
-          <p className="text-sm mb-2">Remarks</p>
+          <div className="flex justify-between items-center mb-2">
+            <p className="text-sm">Remarks</p>
+            <Button size="sm" onClick={saveRemarks}>Save</Button>
+          </div>
+
           <textarea
             value={remarks}
             onChange={(e) => setRemarks(e.target.value)}
             className="w-full border p-2 rounded-md"
-            placeholder="Write notes..."
+            placeholder="Write notes for this period..."
           />
         </Card>
 
@@ -290,7 +404,7 @@ const SalesReceipts = () => {
           <EmptyState title="No sales records" description="No data found" />
         ) : (
           <Card className="p-6">
-            <DataTable columns={columns} data={sales} />
+            <DataTable columns={columns} data={filteredSales} />
           </Card>
         )}
 
